@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: livekit-voice-assistant
+    runtime: python
+    plan: starter
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.1"
+      - key: OPENAI_REALTIME_MODEL
+        value: gpt-realtime-mini
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: LIVEKIT_SIP_TRUNK_ID
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false

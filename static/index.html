@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Assistant</title>
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --card: #141821;
+      --text: #e6e8ee;
+      --muted: #8a92a6;
+      --accent: #6366f1;
+      --accent-2: #22d3ee;
+      --danger: #ef4444;
+      --ok: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+      background: radial-gradient(1200px 800px at 50% -10%, #1a1f2e 0%, var(--bg) 60%);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .card {
+      width: 100%;
+      max-width: 440px;
+      background: var(--card);
+      border: 1px solid #1f2533;
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+    .orb {
+      width: 160px; height: 160px;
+      margin: 8px auto 24px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, var(--accent-2), var(--accent) 60%, #1e1b4b);
+      box-shadow: 0 0 40px rgba(99,102,241,0.4);
+      transition: transform 120ms ease, box-shadow 200ms ease;
+    }
+    .orb.speaking { transform: scale(1.06); box-shadow: 0 0 80px rgba(34,211,238,0.6); }
+    .orb.listening { box-shadow: 0 0 60px rgba(34,197,94,0.45); }
+    .row { display: flex; gap: 10px; margin-top: 12px; }
+    button {
+      flex: 1;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid #2a3042;
+      background: #1b2030;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 120ms ease, transform 80ms ease;
+    }
+    button:hover:not(:disabled) { background: #232a3d; }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.primary { background: var(--accent); border-color: transparent; }
+    button.primary:hover:not(:disabled) { background: #4f46e5; }
+    button.danger { background: var(--danger); border-color: transparent; }
+    .status {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: var(--muted);
+      margin-top: 16px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #4b5563; }
+    .dot.ok { background: var(--ok); }
+    .dot.err { background: var(--danger); }
+    .log {
+      margin-top: 18px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-size: 13px;
+      line-height: 1.45;
+      background: #0e121b;
+      border: 1px solid #1f2533;
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .msg { margin: 4px 0; }
+    .msg .who { color: var(--accent-2); font-weight: 600; margin-right: 6px; }
+    .msg.user .who { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>AI Voice Assistant</h1>
+    <div class="sub">Powered by LiveKit · click connect and start talking</div>
+
+    <div id="orb" class="orb"></div>
+
+    <div class="row">
+      <button id="connectBtn" class="primary">Connect</button>
+      <button id="muteBtn" disabled>Mute</button>
+    </div>
+
+    <div class="status">
+      <span id="dot" class="dot"></span>
+      <span id="statusText">Disconnected</span>
+    </div>
+
+    <div id="log" class="log" style="display:none"></div>
+
+    <hr style="border: none; border-top: 1px solid #1f2533; margin: 24px 0;" />
+    <h1 style="font-size: 16px; margin-bottom: 4px;">Call a phone</h1>
+    <div class="sub">AI dials the number and starts the conversation.</div>
+
+    <input id="phone" placeholder="+15551234567 (E.164)"
+      style="width:100%;padding:10px 12px;margin-bottom:8px;border-radius:8px;border:1px solid #2a3042;background:#0e121b;color:var(--text);font-size:13px;" />
+    <input id="name" placeholder="Name (optional)"
+      style="width:100%;padding:10px 12px;margin-bottom:8px;border-radius:8px;border:1px solid #2a3042;background:#0e121b;color:var(--text);font-size:13px;" />
+    <textarea id="prompt" placeholder="Custom system prompt (optional)" rows="3"
+      style="width:100%;padding:10px 12px;margin-bottom:8px;border-radius:8px;border:1px solid #2a3042;background:#0e121b;color:var(--text);font-size:13px;font-family:inherit;resize:vertical;"></textarea>
+    <button id="callBtn" class="primary" style="width:100%;">Call</button>
+    <div id="callStatus" class="status"></div>
+  </div>
+
+  <script type="module">
+    import {
+      Room,
+      RoomEvent,
+      Track,
+      createLocalAudioTrack,
+    } from "https://cdn.jsdelivr.net/npm/livekit-client@2.5.10/+esm";
+
+    const $ = (id) => document.getElementById(id);
+    const orb = $("orb");
+    const connectBtn = $("connectBtn");
+    const muteBtn = $("muteBtn");
+    const dot = $("dot");
+    const statusText = $("statusText");
+    const log = $("log");
+
+    let room = null;
+    let micTrack = null;
+
+    function setStatus(text, kind) {
+      statusText.textContent = text;
+      dot.className = "dot" + (kind ? " " + kind : "");
+    }
+
+    function addMsg(who, text, cls = "") {
+      log.style.display = "block";
+      const div = document.createElement("div");
+      div.className = "msg " + cls;
+      div.innerHTML = `<span class="who">${who}:</span>${text}`;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function connect() {
+      connectBtn.disabled = true;
+      setStatus("Fetching token…");
+
+      const res = await fetch("/token");
+      if (!res.ok) {
+        setStatus("Token fetch failed", "err");
+        connectBtn.disabled = false;
+        return;
+      }
+      const { token, url } = await res.json();
+
+      room = new Room({ adaptiveStream: true, dynacast: true });
+
+      room
+        .on(RoomEvent.Connected, () => {
+          setStatus("Connected — waiting for assistant…", "ok");
+          orb.classList.add("listening");
+        })
+        .on(RoomEvent.Disconnected, () => {
+          setStatus("Disconnected");
+          orb.classList.remove("listening", "speaking");
+          resetUI();
+        })
+        .on(RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === Track.Kind.Audio) {
+            const el = track.attach();
+            el.autoplay = true;
+            document.body.appendChild(el);
+            setStatus("Assistant connected", "ok");
+          }
+        })
+        .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const remoteSpeaking = speakers.some(
+            (s) => s.identity !== room.localParticipant.identity,
+          );
+          orb.classList.toggle("speaking", remoteSpeaking);
+        })
+        .on(RoomEvent.DataReceived, (payload) => {
+          try {
+            const data = JSON.parse(new TextDecoder().decode(payload));
+            if (data.type === "transcript") {
+              addMsg(data.role === "user" ? "You" : "Assistant", data.text, data.role);
+            }
+          } catch {}
+        });
+
+      try {
+        await room.connect(url, token);
+        micTrack = await createLocalAudioTrack({
+          echoCancellation: true,
+          noiseSuppression: true,
+        });
+        await room.localParticipant.publishTrack(micTrack);
+
+        connectBtn.textContent = "Disconnect";
+        connectBtn.classList.remove("primary");
+        connectBtn.classList.add("danger");
+        connectBtn.disabled = false;
+        muteBtn.disabled = false;
+      } catch (err) {
+        console.error(err);
+        setStatus("Connection failed: " + err.message, "err");
+        connectBtn.disabled = false;
+      }
+    }
+
+    async function disconnect() {
+      if (room) await room.disconnect();
+      room = null;
+      micTrack = null;
+    }
+
+    function resetUI() {
+      connectBtn.textContent = "Connect";
+      connectBtn.classList.add("primary");
+      connectBtn.classList.remove("danger");
+      connectBtn.disabled = false;
+      muteBtn.disabled = true;
+      muteBtn.textContent = "Mute";
+    }
+
+    connectBtn.addEventListener("click", () => {
+      if (room) disconnect();
+      else connect();
+    });
+
+    const callBtn = $("callBtn");
+    const callStatus = $("callStatus");
+
+    callBtn.addEventListener("click", async () => {
+      let phone = $("phone").value.trim().replace(/[\s\-()]/g, "");
+      const name = $("name").value.trim();
+      const prompt = $("prompt").value.trim();
+      if (!phone) {
+        callStatus.textContent = "Phone number required (E.164 format)";
+        return;
+      }
+      if (!phone.startsWith("+")) phone = "+" + phone;
+      callBtn.disabled = true;
+      callStatus.textContent = "Dialing…";
+      try {
+        const res = await fetch("/call", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone, name, prompt }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "call failed");
+        callStatus.textContent = `Calling ${phone} (room: ${data.room})`;
+      } catch (err) {
+        callStatus.textContent = "Error: " + err.message;
+      } finally {
+        callBtn.disabled = false;
+      }
+    });
+
+    muteBtn.addEventListener("click", async () => {
+      if (!micTrack) return;
+      const muted = micTrack.isMuted;
+      await micTrack.mute().catch(() => {});
+      if (muted) await micTrack.unmute();
+      muteBtn.textContent = micTrack.isMuted ? "Unmute" : "Mute";
+    });
+  </script>
+</body>
+</html>
