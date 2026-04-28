@@ -68,7 +68,7 @@ class CallRecorder:
         tmp.write_text(json.dumps(self.data, indent=2, default=str))
         tmp.replace(self.path)
 
-COMPANY = "Grasstone"
+COMPANY = "MAS"
 ROLE = "SDE-2 (Software Development Engineer 2)"
 
 
@@ -181,6 +181,18 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await ctx.connect()
 
+    print(
+        f"\n========== CALL START ==========\n"
+        f"  room:      {ctx.room.name}\n"
+        f"  candidate: {callee_name or '(none)'}\n"
+        f"  phone:     {metadata.get('phone', '(none)')}\n"
+        f"  company:   {COMPANY}\n"
+        f"  role:      {ROLE}\n"
+        f"  custom prompt: {bool(custom_prompt)}\n"
+        f"================================\n",
+        flush=True,
+    )
+
     recorder = CallRecorder(
         ctx.room.name,
         {
@@ -209,20 +221,21 @@ async def entrypoint(ctx: JobContext) -> None:
         item = getattr(ev, "item", None)
         if not item:
             return
-        recorder.event(
-            "message",
-            role=getattr(item, "role", None),
-            text=getattr(item, "text_content", None) or getattr(item, "content", None),
-        )
+        role = getattr(item, "role", None)
+        text = getattr(item, "text_content", None) or getattr(item, "content", None)
+        recorder.event("message", role=role, text=text)
+        if text:
+            label = "👤 USER" if role == "user" else "🤖 MIRA"
+            print(f"\n[{ctx.room.name}] {label}: {text}\n", flush=True)
 
     @session.on("user_input_transcribed")
     def _on_user_transcript(ev):
         if not getattr(ev, "is_final", True):
             return
-        recorder.event(
-            "user_transcript",
-            text=getattr(ev, "transcript", None),
-        )
+        text = getattr(ev, "transcript", None)
+        recorder.event("user_transcript", text=text)
+        if text:
+            print(f"[{ctx.room.name}] (transcript) {text}", flush=True)
 
     def _participant_event(action: str):
         def _handler(participant):
