@@ -20,5 +20,13 @@ services:
         sync: false
       - key: LIVEKIT_SIP_TRUNK_ID
         sync: false
+      - key: TWILIO_TERMINATION_URI
+        sync: false
+      - key: TWILIO_SIP_USERNAME
+        sync: false
+      - key: TWILIO_SIP_PASSWORD
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
       - key: OPENAI_API_KEY
         sync: false

@@ -37,6 +37,21 @@ LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
 LIVEKIT_SIP_TRUNK_ID = os.environ.get("LIVEKIT_SIP_TRUNK_ID")
 AGENT_NAME = "voice-assistant"
 
+TWILIO_ENV_KEYS = (
+    "TWILIO_TERMINATION_URI",
+    "TWILIO_SIP_USERNAME",
+    "TWILIO_SIP_PASSWORD",
+    "TWILIO_PHONE_NUMBER",
+)
+AUTO_TRUNK_NAME = "auto-twilio-trunk"
+
+
+def _normalize_e164(number: str) -> str:
+    digits = re.sub(r"[^\d+]", "", number or "")
+    if not digits.startswith("+"):
+        digits = "+" + digits.lstrip("+")
+    return digits
+
 CALLS_DIR = Path(os.getenv("CALLS_DIR") or (Path(__file__).parent / "calls"))
 CALLS_DIR.mkdir(parents=True, exist_ok=True)
 ROOM_RE = re.compile(r"^call-[a-zA-Z0-9_-]+$")
@@ -89,6 +104,59 @@ def run_async(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+async def _sync_trunk_from_env() -> str | None:
+    """If TWILIO_* env vars are set, ensure a LiveKit outbound trunk that uses
+    those exact credentials, and return its id. Existing auto-managed trunks
+    are deleted and replaced so credential rotation is just an env+restart."""
+    if not all(os.environ.get(k) for k in TWILIO_ENV_KEYS):
+        return None
+
+    address = os.environ["TWILIO_TERMINATION_URI"].strip()
+    phone = _normalize_e164(os.environ["TWILIO_PHONE_NUMBER"])
+    username = os.environ["TWILIO_SIP_USERNAME"]
+    password = os.environ["TWILIO_SIP_PASSWORD"]
+
+    lk = api.LiveKitAPI(url=LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+    try:
+        existing = await lk.sip.list_sip_outbound_trunk(api.ListSIPOutboundTrunkRequest())
+        for t in getattr(existing, "items", []):
+            if t.name == AUTO_TRUNK_NAME:
+                await lk.sip.delete_sip_trunk(
+                    api.DeleteSIPTrunkRequest(sip_trunk_id=t.sip_trunk_id)
+                )
+
+        res = await lk.sip.create_sip_outbound_trunk(
+            api.CreateSIPOutboundTrunkRequest(
+                trunk=api.SIPOutboundTrunkInfo(
+                    name=AUTO_TRUNK_NAME,
+                    address=address,
+                    numbers=[phone],
+                    auth_username=username,
+                    auth_password=password,
+                )
+            )
+        )
+        return res.sip_trunk_id
+    finally:
+        await lk.aclose()
+
+
+try:
+    _auto_trunk_id = run_async(_sync_trunk_from_env())
+    if _auto_trunk_id:
+        LIVEKIT_SIP_TRUNK_ID = _auto_trunk_id
+        print(f"[startup] using auto-managed Twilio trunk {_auto_trunk_id}", flush=True)
+    elif LIVEKIT_SIP_TRUNK_ID:
+        print(f"[startup] using static LIVEKIT_SIP_TRUNK_ID={LIVEKIT_SIP_TRUNK_ID}", flush=True)
+    else:
+        print("[startup] no SIP trunk configured — outbound /call will return 400", flush=True)
+except Exception as e:
+    print(
+        f"[startup] auto-trunk sync failed: {e}; falling back to LIVEKIT_SIP_TRUNK_ID={LIVEKIT_SIP_TRUNK_ID}",
+        flush=True,
+    )
 
 
 @app.get("/")
