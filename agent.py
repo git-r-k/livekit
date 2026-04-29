@@ -370,10 +370,7 @@ async def entrypoint(ctx: JobContext) -> None:
         llm=openai.realtime.RealtimeModel(
             model=os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-mini-realtime-preview"),
             voice="alloy",
-            input_audio_transcription=openai.realtime.InputAudioTranscription(
-                model="whisper-1",
-                language="en",
-            ),
+            input_audio_transcription={"model": "whisper-1", "language": "en"},
         ),
     )
 
