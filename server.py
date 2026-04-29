@@ -24,6 +24,8 @@ from flask import Flask, abort, jsonify, request
 from flask_cors import CORS
 from livekit import api
 
+from evaluation import build_evaluation_record
+
 load_dotenv()
 
 app = Flask(__name__, static_folder="static", static_url_path="")
@@ -53,6 +55,31 @@ def _load_json(path: Path) -> dict | None:
         return json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return None
+
+
+def _ensure_evaluation(room: str) -> tuple[dict | None, str | None]:
+    """Return (evaluation_dict, error). Lazily generates and caches if missing."""
+    eval_path = CALLS_DIR / f"{room}_evaluation.json"
+    cached = _load_json(eval_path)
+    if cached is not None:
+        return cached, None
+
+    conv = _load_json(CALLS_DIR / f"{room}.json")
+    if conv is None:
+        return None, "conversation not found"
+    if not conv.get("ended_at"):
+        return None, "call still in progress"
+
+    try:
+        evaluation = build_evaluation_record(room, conv)
+    except Exception as e:
+        return None, f"evaluation failed: {e}"
+
+    if evaluation is None:
+        return None, "no transcript to evaluate"
+
+    eval_path.write_text(json.dumps(evaluation, indent=2, default=str))
+    return evaluation, None
 
 
 def run_async(coro):
@@ -194,12 +221,12 @@ def list_calls():
 
 @app.get("/calls/<room>")
 def get_call(room):
-    """Return conversation + evaluation together for one call."""
+    """Return conversation + evaluation together. Generates the evaluation lazily."""
     room = _safe_room(room)
     conversation = _load_json(CALLS_DIR / f"{room}.json")
-    evaluation = _load_json(CALLS_DIR / f"{room}_evaluation.json")
-    if conversation is None and evaluation is None:
+    if conversation is None:
         abort(404, description="call not found")
+    evaluation, _ = _ensure_evaluation(room)
     return jsonify({"room": room, "conversation": conversation, "evaluation": evaluation})
 
 
@@ -214,11 +241,16 @@ def get_call_conversation(room):
 
 @app.get("/calls/<room>/evaluation")
 def get_call_evaluation(room):
+    """Return the HR scorecard. Generates and caches it on first request."""
     room = _safe_room(room)
-    data = _load_json(CALLS_DIR / f"{room}_evaluation.json")
-    if data is None:
-        abort(404, description="evaluation not found")
-    return jsonify(data)
+    evaluation, error = _ensure_evaluation(room)
+    if evaluation is None:
+        if error == "conversation not found":
+            abort(404, description=error)
+        if error == "call still in progress":
+            return jsonify({"error": error}), 409
+        return jsonify({"error": error or "evaluation unavailable"}), 500
+    return jsonify(evaluation)
 
 
 if __name__ == "__main__":
