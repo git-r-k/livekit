@@ -2,19 +2,25 @@
 Flask server.
 
 Endpoints:
-  GET  /              -> browser UI (static/index.html)
-  GET  /token         -> JWT for the browser to join a LiveKit room
-  POST /call          -> outbound phone call: dispatches agent + dials via SIP
+  GET  /                       -> browser UI (static/index.html)
+  GET  /token                  -> JWT for the browser to join a LiveKit room
+  POST /call                   -> outbound phone call: dispatches agent + dials via SIP
   GET  /health
+  GET  /calls                  -> list all calls (summary)
+  GET  /calls/<room>           -> full conversation + evaluation JSON
+  GET  /calls/<room>/conversation  -> raw conversation JSON
+  GET  /calls/<room>/evaluation    -> raw evaluation JSON
 """
 
 import asyncio
 import json
 import os
+import re
 import uuid
+from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request
 from flask_cors import CORS
 from livekit import api
 
@@ -28,6 +34,25 @@ LIVEKIT_API_KEY = os.environ["LIVEKIT_API_KEY"]
 LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
 LIVEKIT_SIP_TRUNK_ID = os.environ.get("LIVEKIT_SIP_TRUNK_ID")
 AGENT_NAME = "voice-assistant"
+
+CALLS_DIR = Path(os.getenv("CALLS_DIR") or (Path(__file__).parent / "calls"))
+CALLS_DIR.mkdir(parents=True, exist_ok=True)
+ROOM_RE = re.compile(r"^call-[a-zA-Z0-9_-]+$")
+
+
+def _safe_room(room: str) -> str:
+    if not ROOM_RE.match(room):
+        abort(400, description="invalid room name")
+    return room
+
+
+def _load_json(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def run_async(coro):
@@ -127,6 +152,73 @@ def call():
 @app.get("/health")
 def health():
     return {"ok": True, "sip_configured": bool(LIVEKIT_SIP_TRUNK_ID)}
+
+
+@app.get("/calls")
+def list_calls():
+    """List every call with a short summary. Newest first."""
+    if not CALLS_DIR.exists():
+        return jsonify({"calls": []})
+
+    rooms = {}
+    for path in CALLS_DIR.glob("call-*.json"):
+        name = path.stem
+        if name.endswith("_evaluation"):
+            room = name[: -len("_evaluation")]
+            rooms.setdefault(room, {})["has_evaluation"] = True
+        else:
+            rooms.setdefault(name, {})["has_conversation"] = True
+
+    items = []
+    for room, flags in rooms.items():
+        conv = _load_json(CALLS_DIR / f"{room}.json") or {}
+        evaln = _load_json(CALLS_DIR / f"{room}_evaluation.json") or {}
+        meta = conv.get("metadata", {})
+        items.append({
+            "room": room,
+            "candidate_name": meta.get("name") or evaln.get("candidate_name"),
+            "phone": meta.get("phone") or evaln.get("phone"),
+            "company": meta.get("company") or evaln.get("company"),
+            "role": meta.get("role") or evaln.get("role"),
+            "started_at": conv.get("started_at"),
+            "ended_at": conv.get("ended_at"),
+            "has_conversation": flags.get("has_conversation", False),
+            "has_evaluation": flags.get("has_evaluation", False),
+            "recommendation": evaln.get("recommendation"),
+            "overall_score": (evaln.get("scores") or {}).get("overall_fit_for_role", {}).get("score"),
+        })
+
+    items.sort(key=lambda x: x.get("started_at") or "", reverse=True)
+    return jsonify({"calls": items, "count": len(items)})
+
+
+@app.get("/calls/<room>")
+def get_call(room):
+    """Return conversation + evaluation together for one call."""
+    room = _safe_room(room)
+    conversation = _load_json(CALLS_DIR / f"{room}.json")
+    evaluation = _load_json(CALLS_DIR / f"{room}_evaluation.json")
+    if conversation is None and evaluation is None:
+        abort(404, description="call not found")
+    return jsonify({"room": room, "conversation": conversation, "evaluation": evaluation})
+
+
+@app.get("/calls/<room>/conversation")
+def get_call_conversation(room):
+    room = _safe_room(room)
+    data = _load_json(CALLS_DIR / f"{room}.json")
+    if data is None:
+        abort(404, description="conversation not found")
+    return jsonify(data)
+
+
+@app.get("/calls/<room>/evaluation")
+def get_call_evaluation(room):
+    room = _safe_room(room)
+    data = _load_json(CALLS_DIR / f"{room}_evaluation.json")
+    if data is None:
+        abort(404, description="evaluation not found")
+    return jsonify(data)
 
 
 if __name__ == "__main__":

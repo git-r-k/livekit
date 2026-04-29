@@ -12,6 +12,7 @@ Run modes:
     python agent.py dev       # connect to LiveKit, wait for dispatches
 """
 
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from livekit import api as lkapi
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -26,13 +28,15 @@ from livekit.agents import (
     RoomInputOptions,
     WorkerOptions,
     cli,
+    function_tool,
+    get_job_context,
 )
 from livekit.plugins import openai
 
 load_dotenv()
 
-CALLS_DIR = Path(__file__).parent / "calls"
-CALLS_DIR.mkdir(exist_ok=True)
+CALLS_DIR = Path(os.getenv("CALLS_DIR") or (Path(__file__).parent / "calls"))
+CALLS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class CallRecorder:
@@ -120,7 +124,14 @@ h) Work mode & location — "What's your preferred mode — remote, hybrid, or o
 Ask: "Do you have any questions about the role or about {COMPANY}?" Answer briefly if you know; otherwise say the hiring team will follow up.
 
 ### 4. Closing (under 15 seconds)
-Thank them. Let them know the team will review and get back with next steps. Say goodbye warmly and end the call.
+Thank them. Let them know the team will review and get back with next steps. Say goodbye warmly. Immediately after you finish the goodbye sentence, call the `end_call` tool to hang up — do not wait for the candidate to respond.
+
+You must also call `end_call` in these cases:
+- The candidate clearly says now isn't a good time and declines to reschedule.
+- The candidate becomes rude/abusive after you've said the closing line.
+- The candidate has already said goodbye / "ok bye" / "thanks bye" and the interview is done.
+
+Never call `end_call` in the middle of the interview.
 
 ## CRITICAL — Listening & Turn-Taking Rules
 You are on a PHONE CALL. The #1 rule: WAIT for the candidate to FULLY answer before you speak.
@@ -165,6 +176,128 @@ class Assistant(Agent):
     def __init__(self, instructions: str) -> None:
         super().__init__(instructions=instructions)
 
+    @function_tool()
+    async def end_call(self):
+        """Hang up the phone call. Call this ONLY after you have finished saying goodbye to the candidate at the end of the interview, never earlier."""
+        await asyncio.sleep(2)
+        ctx = get_job_context()
+        await ctx.api.room.delete_room(
+            lkapi.DeleteRoomRequest(room=ctx.room.name)
+        )
+
+
+EVAL_SCHEMA_HINT = """{
+  "candidate_info": {
+    "current_company": null,
+    "current_role": null,
+    "total_years_experience": null,
+    "current_ctc": null,
+    "expected_ctc": null,
+    "notice_period": null,
+    "earliest_join_in_days": null,
+    "current_location": null,
+    "preferred_work_mode": null,
+    "open_to_relocation": null
+  },
+  "tech_stack": {
+    "languages": [],
+    "frontend": [],
+    "backend": [],
+    "databases": [],
+    "cloud_devops": [],
+    "other_tools": []
+  },
+  "technical_assessment": {
+    "questions": [
+      {
+        "topic": "current_role | tech_stack | recent_project | system_design | debugging | tradeoffs | other",
+        "question_asked": "what the interviewer asked, in 1 line",
+        "candidate_answer_summary": "1-2 line factual summary of what the candidate said",
+        "depth": "shallow | adequate | strong",
+        "score_out_of_10": 0,
+        "notes": "what was good / missing"
+      }
+    ],
+    "average_score": 0
+  },
+  "scores": {
+    "communication_clarity": {"score": 0, "notes": ""},
+    "technical_depth":       {"score": 0, "notes": ""},
+    "problem_solving":       {"score": 0, "notes": ""},
+    "ownership_initiative":  {"score": 0, "notes": ""},
+    "english_fluency":       {"score": 0, "notes": ""},
+    "confidence":            {"score": 0, "notes": ""},
+    "overall_fit_for_role":  {"score": 0, "notes": ""}
+  },
+  "summary": "2-3 sentence neutral summary for HR",
+  "strengths": [],
+  "concerns": [],
+  "red_flags": [],
+  "recommendation": "strong_yes | yes | maybe | no | strong_no",
+  "recommendation_reasoning": "",
+  "follow_up_questions_for_next_round": []
+}"""
+
+
+async def _evaluate_call(
+    recorder_data: dict, role: str, company: str, candidate_name: str
+) -> dict | None:
+    """Send the transcript to an LLM and return a structured evaluation."""
+    from openai import AsyncOpenAI
+
+    lines = []
+    for ev in recorder_data.get("events", []):
+        if ev.get("type") != "message":
+            continue
+        ev_role = ev.get("role")
+        text = ev.get("text")
+        if not text or not ev_role:
+            continue
+        speaker = "MIRA" if ev_role == "assistant" else "CANDIDATE"
+        lines.append(f"{speaker}: {text}")
+    transcript = "\n".join(lines).strip()
+    if not transcript:
+        return None
+
+    system = f"""You are a senior technical recruiter analyzing a phone-screening transcript so HR can decide whether to advance the candidate.
+
+Role being screened: {role}
+Company: {company}
+Candidate name: {candidate_name or "(not provided)"}
+
+Return STRICT JSON in exactly this shape (use null when not discussed; never fabricate; keep arrays empty when nothing applies):
+{EVAL_SCHEMA_HINT}
+
+Scoring anchor (1-10):
+- 1-3: red flag, unable to communicate, or wrong fit
+- 4-5: junior level, lacks SDE-2 depth
+- 6-7: solid SDE-2 signal
+- 8-10: exceptional, hire fast
+
+Rules:
+- "confidence" is judged from specificity, depth, and lack of hedging — NOT volume.
+- "english_fluency" reflects clarity in English; ignore accent.
+- "technical_assessment.questions" must list every technical/screening question the recruiter actually asked. If the candidate dodged, score low and note it.
+- For ctc/notice_period, extract verbatim where possible (e.g. "4.5 LPA", "30 days").
+- Be honest. Low scores are fine when warranted.
+- "red_flags" should include things like: refusal to discuss compensation, unable to describe own project, evasiveness about current role, asking the interviewer to teach concepts, etc.
+"""
+
+    client = AsyncOpenAI()
+    resp = await client.chat.completions.create(
+        model=os.getenv("OPENAI_EVAL_MODEL", "gpt-4o-mini"),
+        response_format={"type": "json_object"},
+        temperature=0.2,
+        messages=[
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": f"TRANSCRIPT:\n\n{transcript}\n\nProduce the JSON evaluation now.",
+            },
+        ],
+    )
+    return json.loads(resp.choices[0].message.content)
+
 
 async def entrypoint(ctx: JobContext) -> None:
     metadata = {}
@@ -206,6 +339,30 @@ async def entrypoint(ctx: JobContext) -> None:
     )
     async def _on_shutdown():
         recorder.end()
+        try:
+            evaluation = await _evaluate_call(
+                recorder.data,
+                role=ROLE,
+                company=COMPANY,
+                candidate_name=callee_name,
+            )
+            if evaluation:
+                evaluation = {
+                    "room": ctx.room.name,
+                    "candidate_name": callee_name or None,
+                    "phone": metadata.get("phone", "") or None,
+                    "company": COMPANY,
+                    "role": ROLE,
+                    "evaluated_at": datetime.now(timezone.utc).isoformat(),
+                    "call_started_at": recorder.data.get("started_at"),
+                    "call_ended_at": recorder.data.get("ended_at"),
+                    **evaluation,
+                }
+                eval_path = CALLS_DIR / f"{ctx.room.name}_evaluation.json"
+                eval_path.write_text(json.dumps(evaluation, indent=2, default=str))
+                print(f"[{ctx.room.name}] evaluation saved -> {eval_path}", flush=True)
+        except Exception as e:
+            print(f"[{ctx.room.name}] evaluation failed: {e}", flush=True)
 
     ctx.add_shutdown_callback(_on_shutdown)
 
