@@ -194,9 +194,11 @@ def call():
 
     Body:
       {
-        "phone": "+15551234567",   # E.164
-        "name":  "Alice",          # optional
-        "prompt": "..."            # optional, overrides default agent instructions
+        "phone":     "+15551234567",   # E.164, required
+        "name":      "Alice",          # optional
+        "prompt":    "...",            # optional, fully overrides MIRA's instructions
+        "jd":        "...",            # optional, job description woven into MIRA's prompt
+        "questions": ["...", "..."]    # optional, must-ask questions (string or list)
       }
     """
     if not LIVEKIT_SIP_TRUNK_ID:
@@ -209,9 +211,23 @@ def call():
 
     name = data.get("name", "")
     prompt = data.get("prompt", "")
+    jd = data.get("jd", "") or ""
+    questions = data.get("questions") or []
+    if isinstance(questions, str):
+        questions = [q.strip() for q in questions.splitlines() if q.strip()]
+    elif isinstance(questions, list):
+        questions = [str(q).strip() for q in questions if str(q).strip()]
+    else:
+        questions = []
 
     room_name = f"call-{uuid.uuid4().hex[:10]}"
-    metadata = json.dumps({"name": name, "prompt": prompt, "phone": phone})
+    metadata = json.dumps({
+        "name": name,
+        "prompt": prompt,
+        "phone": phone,
+        "jd": jd,
+        "questions": questions,
+    })
 
     async def trigger():
         lk = api.LiveKitAPI(url=LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)

@@ -76,8 +76,34 @@ COMPANY = "MAS"
 ROLE = "SDE-2 (Software Development Engineer 2)"
 
 
-def build_instructions(candidate_name: str = "the candidate") -> str:
-    return f"""You are Mira, an AI phone screening interviewer at {COMPANY}. You are conducting a preliminary screening call with {candidate_name} for the {ROLE} position.
+def build_instructions(
+    candidate_name: str = "the candidate",
+    jd: str = "",
+    custom_questions: list[str] | None = None,
+) -> str:
+    jd_block = ""
+    if jd and jd.strip():
+        jd_block = f"""
+
+## Job Description for this role
+The hiring team provided the following JD. Use it to tailor follow-ups (e.g., dig into the technologies it lists), but do NOT read it out loud and do NOT quote it verbatim:
+
+{jd.strip()}
+"""
+
+    questions_block = ""
+    if custom_questions:
+        cleaned = [q.strip() for q in custom_questions if q and q.strip()]
+        if cleaned:
+            numbered = "\n".join(f"  {i + 1}. {q}" for i, q in enumerate(cleaned))
+            questions_block = f"""
+
+## Required Questions (must-ask)
+The hiring team wants you to make sure you ask these specific questions during the technical portion. Ask them in your own natural phrasing, one at a time, and weave them alongside the standard screening flow:
+{numbered}
+"""
+
+    return f"""You are Mira, an AI phone screening interviewer at {COMPANY}. You are conducting a preliminary screening call with {candidate_name} for the {ROLE} position.{jd_block}{questions_block}
 
 ## Your Identity
 - Your name is Mira.
@@ -119,6 +145,13 @@ h) Work mode & location — "What's your preferred mode — remote, hybrid, or o
 - If an answer is strong, acknowledge briefly: "That's a solid example."
 - If the candidate goes off-topic, gently redirect: "Got it. Coming back to the engineering side..."
 - Do NOT ask leetcode-style coding puzzles. This is a screening, not a technical round.
+
+**CRITICAL — Do not loop on weak or wrong answers:**
+- If the candidate says "I don't know", "I'm not sure", "I haven't worked on that", or gives an answer that is clearly wrong or off-target — ACCEPT it and move on to the next question. Do NOT re-explain, do NOT rephrase the same question, do NOT push them for a better answer.
+- Examples of correct behavior: "Got it, no worries — let's move on." / "Okay, that's fine. Next question..." / "Alright, fair enough. Moving on."
+- NEVER ask the same question twice. At most ONE clarifying follow-up per topic, and only if the answer was vague (not wrong/missing). After that, accept what they gave and proceed.
+- A wrong or missing answer is itself useful signal. Note it internally and keep going. Your job is to gather data, NOT to teach, correct, or coax.
+- Do not announce a score or judgment to the candidate. Just move on neutrally.
 
 ### 3. Candidate Questions (~1 minute)
 Ask: "Do you have any questions about the role or about {COMPANY}?" Answer briefly if you know; otherwise say the hiring team will follow up.
@@ -196,8 +229,18 @@ async def entrypoint(ctx: JobContext) -> None:
 
     callee_name = metadata.get("name", "")
     custom_prompt = metadata.get("prompt", "")
+    jd = metadata.get("jd", "") or ""
+    custom_questions = metadata.get("questions") or []
+    if isinstance(custom_questions, str):
+        custom_questions = [
+            q.strip() for q in custom_questions.splitlines() if q.strip()
+        ]
 
-    instructions = custom_prompt or build_instructions(callee_name or "the candidate")
+    instructions = custom_prompt or build_instructions(
+        callee_name or "the candidate",
+        jd=jd,
+        custom_questions=custom_questions,
+    )
 
     await ctx.connect()
 
@@ -209,6 +252,8 @@ async def entrypoint(ctx: JobContext) -> None:
         f"  company:   {COMPANY}\n"
         f"  role:      {ROLE}\n"
         f"  custom prompt: {bool(custom_prompt)}\n"
+        f"  jd:        {bool(jd)} ({len(jd)} chars)\n"
+        f"  questions: {len(custom_questions)}\n"
         f"================================\n",
         flush=True,
     )
@@ -221,6 +266,8 @@ async def entrypoint(ctx: JobContext) -> None:
             "company": COMPANY,
             "role": ROLE,
             "custom_prompt": bool(custom_prompt),
+            "jd": jd,
+            "custom_questions": custom_questions,
             "instructions": instructions,
         },
     )

@@ -114,12 +114,21 @@
 
     <input id="phone" placeholder="+15551234567 (E.164)"
       style="width:100%;padding:10px 12px;margin-bottom:8px;border-radius:8px;border:1px solid #2a3042;background:#0e121b;color:var(--text);font-size:13px;" />
-    <input id="name" placeholder="Name (optional)"
+    <input id="name" placeholder="Candidate name (optional)"
       style="width:100%;padding:10px 12px;margin-bottom:8px;border-radius:8px;border:1px solid #2a3042;background:#0e121b;color:var(--text);font-size:13px;" />
-    <textarea id="prompt" placeholder="Custom system prompt (optional)" rows="3"
+    <textarea id="jd" placeholder="Job description (optional) — MIRA uses this to tailor follow-ups" rows="4"
       style="width:100%;padding:10px 12px;margin-bottom:8px;border-radius:8px;border:1px solid #2a3042;background:#0e121b;color:var(--text);font-size:13px;font-family:inherit;resize:vertical;"></textarea>
+    <textarea id="questions" placeholder="Must-ask questions (optional) — one per line" rows="4"
+      style="width:100%;padding:10px 12px;margin-bottom:8px;border-radius:8px;border:1px solid #2a3042;background:#0e121b;color:var(--text);font-size:13px;font-family:inherit;resize:vertical;"></textarea>
+    <details style="margin-bottom:8px;">
+      <summary style="cursor:pointer;color:var(--muted);font-size:12px;">Advanced — fully override MIRA's prompt</summary>
+      <textarea id="prompt" placeholder="Custom system prompt (optional, overrides everything above)" rows="3"
+        style="width:100%;padding:10px 12px;margin-top:6px;border-radius:8px;border:1px solid #2a3042;background:#0e121b;color:var(--text);font-size:13px;font-family:inherit;resize:vertical;"></textarea>
+    </details>
     <button id="callBtn" class="primary" style="width:100%;">Call</button>
     <div id="callStatus" class="status"></div>
+
+    <div id="liveTranscript" class="log" style="display:none;max-height:280px;margin-top:14px;"></div>
   </div>
 
   <script type="module">
@@ -245,10 +254,63 @@
     const callBtn = $("callBtn");
     const callStatus = $("callStatus");
 
+    const liveTranscript = $("liveTranscript");
+    let livePollTimer = null;
+    let liveSeenCount = 0;
+
+    function appendLive(role, text) {
+      liveTranscript.style.display = "block";
+      const div = document.createElement("div");
+      div.className = "msg " + (role === "user" ? "user" : "");
+      const who = role === "user" ? "Candidate" : "MIRA";
+      div.innerHTML = `<span class="who">${who}:</span>${text}`;
+      liveTranscript.appendChild(div);
+      liveTranscript.scrollTop = liveTranscript.scrollHeight;
+    }
+
+    function stopLivePolling() {
+      if (livePollTimer) {
+        clearInterval(livePollTimer);
+        livePollTimer = null;
+      }
+    }
+
+    async function pollOnce(room) {
+      try {
+        const r = await fetch(`/calls/${room}/conversation`);
+        if (!r.ok) return;
+        const conv = await r.json();
+        const events = (conv.events || []).filter(
+          (e) => e.type === "message" && e.text,
+        );
+        for (let i = liveSeenCount; i < events.length; i++) {
+          appendLive(events[i].role, events[i].text);
+        }
+        liveSeenCount = events.length;
+        if (conv.ended_at) {
+          callStatus.textContent = `Call ended (room: ${room}). Evaluation generating…`;
+          stopLivePolling();
+        }
+      } catch {}
+    }
+
+    function startLivePolling(room) {
+      stopLivePolling();
+      liveTranscript.innerHTML = "";
+      liveSeenCount = 0;
+      pollOnce(room);
+      livePollTimer = setInterval(() => pollOnce(room), 2000);
+    }
+
     callBtn.addEventListener("click", async () => {
       let phone = $("phone").value.trim().replace(/[\s\-()]/g, "");
       const name = $("name").value.trim();
       const prompt = $("prompt").value.trim();
+      const jd = $("jd").value.trim();
+      const questions = $("questions").value
+        .split("\n")
+        .map((q) => q.trim())
+        .filter(Boolean);
       if (!phone) {
         callStatus.textContent = "Phone number required (E.164 format)";
         return;
@@ -260,11 +322,12 @@
         const res = await fetch("/call", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone, name, prompt }),
+          body: JSON.stringify({ phone, name, prompt, jd, questions }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "call failed");
         callStatus.textContent = `Calling ${phone} (room: ${data.room})`;
+        startLivePolling(data.room);
       } catch (err) {
         callStatus.textContent = "Error: " + err.message;
       } finally {
