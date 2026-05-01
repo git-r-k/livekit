@@ -27,7 +27,7 @@
     }
     .card {
       width: 100%;
-      max-width: 440px;
+      max-width: 520px;
       background: var(--card);
       border: 1px solid #1f2533;
       border-radius: 16px;
@@ -87,6 +87,109 @@
     .msg { margin: 4px 0; }
     .msg .who { color: var(--accent-2); font-weight: 600; margin-right: 6px; }
     .msg.user .who { color: var(--ok); }
+
+    .chat-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px;
+      background: #0e121b;
+      border: 1px solid #1f2533;
+      border-bottom: none;
+      border-radius: 10px 10px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .chat-header .live-dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--ok);
+      margin-right: 6px;
+      animation: pulse 1.6s infinite;
+    }
+    .chat-header.ended .live-dot { background: var(--muted); animation: none; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.35; }
+    }
+    .chat {
+      max-height: 360px;
+      overflow-y: auto;
+      background: #0e121b;
+      border: 1px solid #1f2533;
+      border-top: none;
+      border-radius: 0 0 10px 10px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .chat .empty {
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+      padding: 18px 0;
+    }
+    .bubble-row { display: flex; flex-direction: column; max-width: 82%; }
+    .bubble-row.mira { align-self: flex-start; }
+    .bubble-row.user { align-self: flex-end; align-items: flex-end; }
+    .bubble-meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin: 0 4px 3px;
+      letter-spacing: 0.02em;
+    }
+    .bubble {
+      padding: 10px 13px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .bubble.mira {
+      background: #1b2030;
+      border: 1px solid #262d40;
+      border-top-left-radius: 4px;
+    }
+    .bubble.user {
+      background: linear-gradient(135deg, #4f46e5, #6366f1);
+      color: #fff;
+      border-top-right-radius: 4px;
+    }
+    .typing {
+      display: inline-flex; gap: 3px; padding: 12px 14px;
+      background: #1b2030;
+      border: 1px solid #262d40;
+      border-radius: 14px 14px 14px 4px;
+      align-self: flex-start;
+    }
+    .typing span {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--muted);
+      animation: bounce 1s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: 0.15s; }
+    .typing span:nth-child(3) { animation-delay: 0.30s; }
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+      30%           { transform: translateY(-4px); opacity: 1; }
+    }
+    .chat-footer {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+    }
+    .chat-footer a {
+      color: var(--accent-2);
+      text-decoration: none;
+      padding: 6px 10px;
+      border: 1px solid #2a3042;
+      border-radius: 8px;
+      background: #0e121b;
+    }
+    .chat-footer a:hover { background: #1b2030; }
   </style>
 </head>
 <body>
@@ -128,7 +231,19 @@
     <button id="callBtn" class="primary" style="width:100%;">Call</button>
     <div id="callStatus" class="status"></div>
 
-    <div id="liveTranscript" class="log" style="display:none;max-height:280px;margin-top:14px;"></div>
+    <div id="liveWrap" style="display:none;margin-top:16px;">
+      <div id="chatHeader" class="chat-header">
+        <span><span class="live-dot"></span><span id="chatStatus">Live</span></span>
+        <span id="chatRoom" style="font-family:ui-monospace,monospace;"></span>
+      </div>
+      <div id="chat" class="chat">
+        <div class="empty" id="chatEmpty">Waiting for the call to connect…</div>
+      </div>
+      <div id="chatFooter" class="chat-footer" style="display:none;">
+        <a id="convLink" href="#" target="_blank">Conversation JSON</a>
+        <a id="evalLink" href="#" target="_blank">Evaluation (HR scorecard)</a>
+      </div>
+    </div>
   </div>
 
   <script type="module">
@@ -254,18 +369,64 @@
     const callBtn = $("callBtn");
     const callStatus = $("callStatus");
 
-    const liveTranscript = $("liveTranscript");
+    const liveWrap = $("liveWrap");
+    const chat = $("chat");
+    const chatEmpty = $("chatEmpty");
+    const chatHeader = $("chatHeader");
+    const chatStatus = $("chatStatus");
+    const chatRoom = $("chatRoom");
+    const chatFooter = $("chatFooter");
+    const convLink = $("convLink");
+    const evalLink = $("evalLink");
+
     let livePollTimer = null;
     let liveSeenCount = 0;
+    let typingEl = null;
 
-    function appendLive(role, text) {
-      liveTranscript.style.display = "block";
-      const div = document.createElement("div");
-      div.className = "msg " + (role === "user" ? "user" : "");
-      const who = role === "user" ? "Candidate" : "MIRA";
-      div.innerHTML = `<span class="who">${who}:</span>${text}`;
-      liveTranscript.appendChild(div);
-      liveTranscript.scrollTop = liveTranscript.scrollHeight;
+    function fmtTime(iso) {
+      if (!iso) return "";
+      const d = new Date(iso);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    }
+
+    function showTyping() {
+      if (typingEl) return;
+      typingEl = document.createElement("div");
+      typingEl.className = "typing";
+      typingEl.innerHTML = "<span></span><span></span><span></span>";
+      chat.appendChild(typingEl);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function hideTyping() {
+      if (typingEl) {
+        typingEl.remove();
+        typingEl = null;
+      }
+    }
+
+    function appendBubble(role, text, ts) {
+      if (chatEmpty && chatEmpty.parentNode) chatEmpty.remove();
+      hideTyping();
+      const isUser = role === "user";
+      const row = document.createElement("div");
+      row.className = "bubble-row " + (isUser ? "user" : "mira");
+
+      const meta = document.createElement("div");
+      meta.className = "bubble-meta";
+      meta.textContent = (isUser ? "Candidate" : "MIRA") + (ts ? " · " + fmtTime(ts) : "");
+      row.appendChild(meta);
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble " + (isUser ? "user" : "mira");
+      bubble.textContent = text;
+      row.appendChild(bubble);
+
+      chat.appendChild(row);
+      chat.scrollTop = chat.scrollHeight;
+
+      if (!isUser) showTyping();
+      else hideTyping();
     }
 
     function stopLivePolling() {
@@ -284,11 +445,17 @@
           (e) => e.type === "message" && e.text,
         );
         for (let i = liveSeenCount; i < events.length; i++) {
-          appendLive(events[i].role, events[i].text);
+          appendBubble(events[i].role, events[i].text, events[i].ts);
         }
         liveSeenCount = events.length;
         if (conv.ended_at) {
-          callStatus.textContent = `Call ended (room: ${room}). Evaluation generating…`;
+          hideTyping();
+          chatHeader.classList.add("ended");
+          chatStatus.textContent = "Call ended · " + fmtTime(conv.ended_at);
+          callStatus.textContent = `Call ended. Evaluation generating in background…`;
+          convLink.href = `/calls/${room}/conversation`;
+          evalLink.href = `/calls/${room}/evaluation`;
+          chatFooter.style.display = "flex";
           stopLivePolling();
         }
       } catch {}
@@ -296,8 +463,14 @@
 
     function startLivePolling(room) {
       stopLivePolling();
-      liveTranscript.innerHTML = "";
+      chat.innerHTML = '<div class="empty" id="chatEmpty">Waiting for the call to connect…</div>';
       liveSeenCount = 0;
+      typingEl = null;
+      chatHeader.classList.remove("ended");
+      chatStatus.textContent = "Live";
+      chatRoom.textContent = room;
+      chatFooter.style.display = "none";
+      liveWrap.style.display = "block";
       pollOnce(room);
       livePollTimer = setInterval(() => pollOnce(room), 2000);
     }
