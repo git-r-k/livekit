@@ -14,6 +14,7 @@ Run modes:
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,24 @@ from livekit.agents import (
 from livekit.plugins import openai
 
 load_dotenv()
+
+
+class _EngineClosedFilter(logging.Filter):
+    """Drops the harmless 'engine is closed' warnings emitted after we
+    intentionally delete the room from end_call. They fire when the
+    agent's housekeeping tries to flush a final transcript message to a
+    room that's already gone."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "engine is closed" in msg:
+            return False
+        if "failed to send binary stream message" in msg:
+            return False
+        return True
+
+
+logging.getLogger("livekit.agents").addFilter(_EngineClosedFilter())
 
 CALLS_DIR = Path(os.getenv("CALLS_DIR") or (Path(__file__).parent / "calls"))
 CALLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -157,7 +176,12 @@ h) Work mode & location — "What's your preferred mode — remote, hybrid, or o
 Ask: "Do you have any questions about the role or about {COMPANY}?" Answer briefly if you know; otherwise say the hiring team will follow up.
 
 ### 4. Closing (under 15 seconds)
-Thank them. Let them know the team will review and get back with next steps. Say goodbye warmly. Immediately after you finish the goodbye sentence, call the `end_call` tool to hang up — do not wait for the candidate to respond.
+Thank them. Let them know the team will review and get back with next steps. Say goodbye warmly in ONE short sentence (e.g., "Thanks so much for your time today, take care, bye!"). Then immediately call the `end_call` tool. Do not wait for the candidate to respond.
+
+CRITICAL — once you decide to end the call:
+- Speak EXACTLY ONE final goodbye sentence, then call `end_call`.
+- Do NOT add extra sentences after that goodbye ("Thanks so much for this..." followed by another wrap-up). One sentence, then `end_call`.
+- After calling `end_call`, DO NOT speak again under any circumstance. The call is over.
 
 You must also call `end_call` in these cases:
 - The candidate clearly says now isn't a good time and declines to reschedule.
@@ -212,7 +236,17 @@ class Assistant(Agent):
     @function_tool()
     async def end_call(self):
         """Hang up the phone call. Call this ONLY after you have finished saying goodbye to the candidate at the end of the interview, never earlier."""
-        await asyncio.sleep(2)
+        # Wait for any in-flight speech (the goodbye line) to finish playing
+        # to the SIP side. Tearing down the room while audio is still streaming
+        # cuts MIRA off mid-sentence.
+        try:
+            speech = getattr(self.session, "current_speech", None)
+            if speech is not None:
+                await speech.wait_for_playout()
+        except Exception:
+            pass
+        # Small extra buffer so the SIP audio buffer drains.
+        await asyncio.sleep(1.5)
         ctx = get_job_context()
         await ctx.api.room.delete_room(
             lkapi.DeleteRoomRequest(room=ctx.room.name)
