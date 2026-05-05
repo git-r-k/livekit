@@ -194,11 +194,15 @@ def call():
 
     Body:
       {
-        "phone":     "+15551234567",   # E.164, required
-        "name":      "Alice",          # optional
-        "prompt":    "...",            # optional, fully overrides MIRA's instructions
-        "jd":        "...",            # optional, job description woven into MIRA's prompt
-        "questions": ["...", "..."]    # optional, must-ask questions (string or list)
+        "phone":            "+15551234567",   # E.164, required
+        "name":             "Alice",          # optional
+        "prompt":           "...",            # optional, fully overrides MIRA's instructions
+        "jd":               "...",            # optional, job description woven into MIRA's prompt
+        "questions":        ["...", "..."],   # optional, must-ask questions (string or list)
+        "evaluation_mode":  "mentorship",     # optional: "screening" (default) | "mentorship"
+        "webhook_url":      "https://...",    # optional: POSTed when the call ends
+        "webhook_secret":   "...",            # optional: sent as x-webhook-secret header
+        "correlation_id":   "miss-ozone-uuid" # optional: opaque, echoed back in webhook
       }
     """
     if not LIVEKIT_SIP_TRUNK_ID:
@@ -220,6 +224,13 @@ def call():
     else:
         questions = []
 
+    evaluation_mode = (data.get("evaluation_mode") or "screening").strip().lower()
+    if evaluation_mode not in ("screening", "mentorship"):
+        return jsonify({"error": "evaluation_mode must be 'screening' or 'mentorship'"}), 400
+    webhook_url = (data.get("webhook_url") or "").strip() or None
+    webhook_secret = data.get("webhook_secret") or None
+    correlation_id = data.get("correlation_id") or None
+
     room_name = f"call-{uuid.uuid4().hex[:10]}"
     metadata = json.dumps({
         "name": name,
@@ -227,6 +238,10 @@ def call():
         "phone": phone,
         "jd": jd,
         "questions": questions,
+        "evaluation_mode": evaluation_mode,
+        "webhook_url": webhook_url,
+        "webhook_secret": webhook_secret,
+        "correlation_id": correlation_id,
     })
 
     async def trigger():
@@ -257,7 +272,13 @@ def call():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    return jsonify({"room": room_name, "phone": phone, "status": "dialing"})
+    return jsonify({
+        "room": room_name,
+        "phone": phone,
+        "status": "dialing",
+        "evaluation_mode": evaluation_mode,
+        "correlation_id": correlation_id,
+    })
 
 
 @app.get("/health")

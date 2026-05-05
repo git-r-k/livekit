@@ -16,6 +16,9 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +38,30 @@ from livekit.agents import (
 from livekit.plugins import openai
 
 load_dotenv()
+
+
+def _post_webhook(url: str, payload: dict, secret: str | None) -> None:
+    """Fire a JSON POST to the given webhook URL. Best-effort, never raises.
+
+    Runs in a thread so the agent's 10s shutdown timeout doesn't kill it.
+    """
+
+    def _send():
+        try:
+            body = json.dumps(payload, default=str).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if secret:
+                headers["x-webhook-secret"] = secret
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                resp.read()
+                print(f"[webhook] {url} → {resp.status}", flush=True)
+        except urllib.error.HTTPError as e:
+            print(f"[webhook] {url} HTTP {e.code}: {e.reason}", flush=True)
+        except Exception as e:
+            print(f"[webhook] {url} failed: {e}", flush=True)
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 class _EngineClosedFilter(logging.Filter):
@@ -270,6 +297,11 @@ async def entrypoint(ctx: JobContext) -> None:
             q.strip() for q in custom_questions.splitlines() if q.strip()
         ]
 
+    evaluation_mode = (metadata.get("evaluation_mode") or "screening").strip().lower()
+    webhook_url = metadata.get("webhook_url") or None
+    webhook_secret = metadata.get("webhook_secret") or None
+    correlation_id = metadata.get("correlation_id") or None
+
     instructions = custom_prompt or build_instructions(
         callee_name or "the candidate",
         jd=jd,
@@ -303,10 +335,30 @@ async def entrypoint(ctx: JobContext) -> None:
             "jd": jd,
             "custom_questions": custom_questions,
             "instructions": instructions,
+            "evaluation_mode": evaluation_mode,
+            "correlation_id": correlation_id,
+            # webhook_url / webhook_secret are intentionally NOT persisted to disk
+            # to avoid leaking secrets via the calls/ directory.
         },
     )
     async def _on_shutdown():
         recorder.end()
+        if webhook_url:
+            _post_webhook(
+                webhook_url,
+                {
+                    "event": "call.ended",
+                    "room": ctx.room.name,
+                    "correlation_id": correlation_id,
+                    "evaluation_mode": evaluation_mode,
+                    "status": "ended",
+                    "started_at": recorder.data.get("started_at"),
+                    "ended_at": recorder.data.get("ended_at"),
+                    "phone": metadata.get("phone", ""),
+                    "name": callee_name,
+                },
+                webhook_secret,
+            )
 
     ctx.add_shutdown_callback(_on_shutdown)
 
